@@ -35,8 +35,3 @@ Metin verilerinin duygu durumunu analiz eden ve raporlayan çok agentlı bir sis
    - Zaman damgası ekler
 
 
-
-
-## 📧 İletişim
-
-Sorularınız için [email@example.com] adresinden ulaşabilirsiniz.
