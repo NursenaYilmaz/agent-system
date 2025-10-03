@@ -1,164 +1,275 @@
-from datetime import datetime
 from transformers import pipeline
-from collections import deque
+from queue import Queue, Empty
+from threading import Thread, Event
+import time
+import uuid
 
-
-class TextAnalyzerAgent:
-    def __init__(self,name,message_queue):
-        self.name=name
-        self.message_queue=message_queue
-        print(f"{self.name} Agent hazırlanıyor")
-
-        self.toxicity_detector=pipeline(
-            model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-            task="sentiment-analysis"  
-        )
-        print(f"{self.name} model hazır!")
-
-    def process(self, input_data):
-        text = input_data.get("text", "")
-        if not text:
-           return {"status": "error", "message": "metin yok"}
-    
-        result = self.toxicity_detector(text)
-        analysis=result[0]
-        label=analysis["label"]
-        score=analysis["score"]
-
-    
-        if label == "negative":
-          sentiment = "Negatif"
-        elif label == "neutral":
-          sentiment = "Nötr"
-        else:  # positive
-          sentiment = "Pozitif"
-
-
-        confidence_percent = round(score * 100, 2)
-        self.message_queue.send_message(
-           sender=self.name,
-           receiver="Rapor Agent",
-           message_type="Analysis complete",
-           content=f"Duygu: {sentiment}, Güven: %{confidence_percent}"
-        )
-        return {
-        "status": "success",
-        "original_text": text,
-        "sentiment":sentiment,
-        "confidence_score":confidence_percent,
-        "label": label
-        }
-
-
-
-    
-class ReportGeneratorAgent:
-    def __init__(self,name,message_queue):
-        self.name=name
-        self.message_queue=message_queue
-        print(f"Agent hazır:{self.name}")
-
-    def process(self, input_data):
-        incoming_messages = self.message_queue.get_messages_for(self.name)
-        if incoming_messages:
-           print(f"\n {self.name} mesajları okuyor:")
-           for msg in incoming_messages:
-             print(f"{msg['sender']}: {msg['content']}")
-        status = input_data.get("status", "") 
-        if status == "error":
-            return {"status": "error", "message": "Önceki agenttan hata geldi"}
-        
-        self.message_queue.send_message(
-        sender=self.name,
-        receiver="Analiz Agent",
-        message_type="REPORT_GENERATED",
-        content="Rapor başarıyla oluşturuldu"
-    )
-           
-        sentiment = input_data.get("sentiment", "")
-        confidence_score = input_data.get("confidence_score", 0)
-        original_text = input_data.get("original_text", "")
-        label = input_data.get("label", "")
-        emoji=input_data.get("emoji","")
-
-        report = f"DUYGU ANALİZİ RAPORU\n Metin: {original_text}\n Duygu: {sentiment}\n Güven Skoru: %{confidence_score}"
-
-        return {
-        "status": "success",
-        "report": report,
-        "sentiment":sentiment,
-        "agent_name": self.name
+def create_message(sender, receiver, type_, payload, correlation_id=None, schema_version="1.0"):
+    #standart mesaj formatı
+    return {
+        "message_id": str(uuid.uuid4()),
+        "correlation_id": correlation_id or str(uuid.uuid4()),
+        "schema_version": schema_version,
+        "timestamp": time.time(),
+        "sender": sender,
+        "receiver": receiver,
+        "type": type_,
+        "payload": payload,
     }
 
-
-class A2AManager:
+class MessageBus:                                                   #agentlar arası haberleşme için 
+    
+    
     def __init__(self):
-        self.message_queue = MessageQueue()  
-        self.agent1 = TextAnalyzerAgent("Analiz Agent", self.message_queue)  
-        self.agent2 = ReportGeneratorAgent("Rapor Agent", self.message_queue)  
-        print(f"Agentlar hazır.")
+        self.queues = {}
     
-    def run_pipeline(self, user_text):
-        print(f"\n Pipeline başladı: {user_text}")
-        self.message_queue.clear_messages() 
+    def register_agent(self, agent_name):
+        if agent_name not in self.queues: 
+            self.queues[agent_name] = Queue()# her agent için bir kuyruk oluşturma
+    
+    def send_message(self, receiver, message):
+        if receiver not in self.queues:
+            self.register_agent(receiver)
+        self.queues[receiver].put(message) # mesajı alıcının kuyruğuna koyar.
+    
+    def receive_message(self, receiver, timeout=0.2):
+        if receiver not in self.queues:
+            self.register_agent(receiver) 
         
-        input_data = {"text": user_text}
-        agent1_output = self.agent1.process(input_data)
-        agent2_output = self.agent2.process(agent1_output)
+        try:
+            return self.queues[receiver].get(timeout=timeout) #0.2 sn bekler mesaj varsa alır yoksa hata fırlatır.
+        except Empty:
+            return None
+
+
+class BaseAgent(Thread): #Thread sınıfından türüyor, yani her agent ayrı bir thread'de çalışabilir
+    
+    def __init__(self, name, bus, stop_event):
+        super().__init__(daemon=True) #daemon=True: Ana program biterse bu thread'ler de otomatik kapanır
+        self.name = name
+        self.bus = bus
+        self.stop_event = stop_event # Thread'i durdurmak için sinyal sistemi
+        self.bus.register_agent(name)
+    
+    def run(self): #Thread başlatıldığında otomatik çalışır.
+        while not self.stop_event.is_set():  # Dur sinyali gelene kadar sürekli döngüde kal
+#Sürekli kendi kuyruğunu kontrol eder
+            message = self.bus.receive_message(self.name)
+            if message:
+                try:
+                    self.handle_message(message)
+                except Exception as e:
+                    print(f"[{self.name}] Hata: {e}")
+    
+    def handle_message(self, message):
+        raise NotImplementedError #Alt sınıflar bunu override etmek zorunda
+
+
+class TextAnalysisAgent(BaseAgent):
+    
+    def __init__(self, name, bus, stop_event):
+        super().__init__(name, bus, stop_event)
         
-        print(f"\n {agent2_output['report']}")
-        return agent2_output
+        print(f"[{self.name}] Sentiment model yükleniyor...")
+        self.classifier = pipeline(
+            "sentiment-analysis",
+            model="cardiffnlp/twitter-roberta-base-sentiment-latest"
+        )
+        print(f"[{self.name}] Model hazır!")
     
-class MessageQueue:
-   def __init__(self):
-      self.messages=deque()
+    def handle_message(self, message):
+        if message["type"] != "ANALYZE_REQUEST":
+            return
+        
+        text = message["payload"].get("text", "")
+        correlation_id = message.get("correlation_id")
+
+        if not text.strip():
+            error_msg = {
+                "type": "ERROR",
+                "sender": self.name,
+                "payload": {"error": "Boş metin gönderildi."},
+                "correlation_id": correlation_id
+            }
+
+            error_msg = create_message(
+                sender=self.name,
+                receiver="Manager",
+                type_="ERROR",
+                payload=error_msg["payload"],
+                correlation_id=correlation_id
+            )
+            self.bus.send_message(error_msg["receiver"], error_msg)
+            return
+        
+        print(f"[{self.name}] Analiz Ediliyor: '{text[:50]}...'")
+        
+
+        result = self.classifier(text)[0]
+        label = result["label"]
+        score = result["score"]
+        
+
+        sentiment_map = {
+            "positive": "Pozitif",
+            "negative": "Negatif", 
+            "neutral": "Nötr"
+        }
+        sentiment_tr = sentiment_map.get(label.lower(), "Bilinmiyor")
+        
+
+        response = {
+            "type": "ANALYSIS_COMPLETE",
+            "sender": self.name,
+            "payload": {
+                "text": text,
+                "label": label,
+                "score": score,
+                "sentiment_tr": sentiment_tr
+            },
+            "correlation_id": correlation_id
+        }
+
+        response = create_message(
+            sender=self.name,
+            receiver="ReportAgent",
+            type_="ANALYSIS_COMPLETE",
+            payload=response["payload"],
+            correlation_id=correlation_id
+        )
+        self.bus.send_message(response["receiver"], response)
+
+
+class ReportAgent(BaseAgent):
+
     
-   def send_message(self,sender,receiver,message_type,content):
-      message={"sender":sender,
-                "receiver":receiver,
-                "message_type":message_type,
-                "content":content,
-                "timestamp":datetime.now()
-      }
-      self.messages.append(message)
-      print(f"[{message['timestamp']}] {sender} -> {receiver}: {message_type}")
-      
-   def get_messages_for(self,receiver):
-      received=[msg for msg in self.messages if msg["receiver"]==receiver]
-      return received
-   def clear_messages(self):
-      self.messages.clear()
-      
+    def handle_message(self, message):
+
+        if message["type"] != "ANALYSIS_COMPLETE":
+            return
+        
+        data = message["payload"]
+        correlation_id = message.get("correlation_id")
+        
+
+        report = (
+    "\n"
+    "============================================================\n"
+    "SENTIMENT ANALYSIS REPORT\n"
+    "============================================================\n"
+    f"Text      : {data['text']}\n"
+    f"Sentiment : {data['sentiment_tr']} ({data['label']})\n"
+    f"Confidence: {round(data['score'] * 100, 2)}%\n"
+)
+
+
+        
+        print(f"[{self.name}] Rapor oluşturuldu")
+        
+
+        report_msg = {
+            "type": "REPORT_READY",
+            "sender": self.name,
+            "payload": {
+                "report": report,
+                "raw_data": data
+            },
+            "correlation_id": correlation_id
+        }
+
+        report_msg = create_message(
+            sender=self.name,
+            receiver="Manager",
+            type_="REPORT_READY",
+            payload=report_msg["payload"],
+            correlation_id=correlation_id
+        )
+        self.bus.send_message(report_msg["receiver"], report_msg)
+
+
+class Manager:
+
     
+    def __init__(self):
+        print("[Manager] A2A sistemi başlatılıyor")
+        
+        self.bus = MessageBus() 
+        self.stop_event = Event() #üm thread'lere "dur" sinyali göndermek için
+        
+
+        self.text_agent = TextAnalysisAgent("TextAgent", self.bus, self.stop_event)
+        self.report_agent = ReportAgent("ReportAgent", self.bus, self.stop_event)
+        
+        self.bus.register_agent("Manager")
+        
+        self.text_agent.start() #Thread'leri başlatır (her biri kendi run() methodunu çalıştırır)
+        self.report_agent.start()
+        
+        print("[Manager] Tüm Agentlar başarıyla başlatıldı.\n")
+    
+    def analyze_text(self, text, timeout=5.0):
+
+        correlation_id = str(uuid.uuid4()) #Her istek için unique bir ID üretir.
+        
+
+        request = {
+            "type": "ANALYZE_REQUEST",
+            "sender": "Manager",
+            "payload": {"text": text},
+            "correlation_id": correlation_id
+        }
+
+        request = create_message(
+            sender="Manager",
+            receiver="TextAgent",
+            type_="ANALYZE_REQUEST",
+            payload=request["payload"],
+            correlation_id=correlation_id
+        )
+        self.bus.send_message(request["receiver"], request)
+        
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            response = self.bus.receive_message("Manager")
+            
+            if response and response.get("correlation_id") == correlation_id:
+                if response["type"] == "REPORT_READY":
+                    return response["payload"]
+                elif response["type"] == "ERROR":
+                    return {"error": response["payload"]["error"]}
+        
+        return {"error": "Zaman aşımı - Yanıt alınamadı"}
+    
+    def shutdown(self):
+
+        print("\n[Manager] Sistem kapatılıyor.")
+        self.stop_event.set()
+        self.text_agent.join(timeout=1.0)
+        self.report_agent.join(timeout=1.0)
+        print("[Manager] Sistem durduruldu")
+
+
 if __name__ == "__main__":
-    manager = A2AManager()
+    manager = Manager()
     
-    print("\n")
-    print("TEST 1: Pozitif Metin")
-    print("\n")
-    manager.run_pipeline("I love this beautiful day!")
-    
-    print("\n")
-    print("TEST 2: Negatif Metin")
-    print("\n")
-    manager.run_pipeline("I hate you, you are stupid!")
-    
-    print("\n")
-    print("TEST 3: Nötr Metin")
-    print("\n")
-    manager.run_pipeline("I went to the store yesterday.")
-    
-    print("\n")
-    print("TEST 4: Çok Pozitif Metin")
-    print("\n")
-    manager.run_pipeline("This is amazing! I'm so happy and excited!")
-    
-    print("\n")
-    print("TEST 5: Çok Negatif Metin")
-    print("\n")
-    manager.run_pipeline("This is terrible and awful. I'm so disappointed.")
-
-
-
-
-    
+    try:
+        test_texts = [
+            "I love this beautiful day!",
+            "I hate you, you are stupid!",
+            "I went to the store yesterday.",
+            "This is amazing! I'm so happy and excited!",
+            "This is terrible and awful. I'm so disappointed."
+        ]
+        
+        for text in test_texts:
+            print(f"\n İşleniyor: '{text}'")
+            result = manager.analyze_text(text, timeout=8.0)
+            
+            if "report" in result:
+                print(result["report"])
+            elif "error" in result:
+                print(f"[ERROR] {result['error']}")
+        
+    finally:
+        manager.shutdown()
