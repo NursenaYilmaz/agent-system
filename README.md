@@ -1,37 +1,14 @@
-# Agent-to-Agent Duygu Analizi Sistemi
+# Agent-to-Agent (A2A) Örnek Proje
 
-Metin verilerinin duygu durumunu analiz eden ve raporlayan çok agentlı bir sistem.
+Bu proje, **lokal olarak çalışan iki agentın** (ajanın) birbirleriyle **A2A protokolü** üzerinden mesajlaşmasını göstermektedir.  
 
-##  Özellikler
+- **TextAgent**: Hugging Face `transformers` kütüphanesi ile metin üzerinde duygu analizi yapar.  
+- **ReportAgent**: Analiz sonucunu alır ve rapor hazırlar.  
+- **Manager**: İstek gönderir, sonuç raporunu alır.  
+- **MessageBus**: Agentlar arası mesajlaşmayı sağlar.  
 
-- **Duygu Analizi**: Metinlerin pozitif, negatif veya nötr duygularını tespit eder
-- **Agent İletişimi**: İki agent arası mesajlaşma sistemi
-- **Otomatik Raporlama**: Analiz sonuçlarını detaylı raporlar halinde sunar
-- **Güven Skoru**: Her analiz için güvenilirlik yüzdesi hesaplar
-
-##  Kullanılan Teknolojiler
-
-- Python 3.x
-- Transformers (Hugging Face)
-- CardiffNLP Twitter RoBERTa Sentiment Model
-
-##  Sistem Mimarisi
-
-### Agent'lar
-
-1. **TextAnalyzerAgent (Analiz Agent)**
-   - Metin duygu analizini gerçekleştirir
-   - Sentiment skorunu hesaplar
-   - Sonuçları Rapor Agent'a iletir
-
-2. **ReportGeneratorAgent (Rapor Agent)**
-   - Analiz sonuçlarını alır
-   - Detaylı rapor oluşturur
-   - Sonuçları formatlar
-
-3. **MessageQueue**
-   - Agent'lar arası iletişimi yönetir
-   - Mesaj geçmişini tutar
-   - Zaman damgası ekler
-
+## Özellikler
+- Lokal çalışır, harici API gerektirmez.  
+- Standart **mesaj zarfı (envelope)** kullanır: `message_id`, `correlation_id`, `sender`, `receiver`, `type`, `payload`.  
+- Thread tabanlı yapı ile her agent kendi kuyruğunu dinler.  
 
